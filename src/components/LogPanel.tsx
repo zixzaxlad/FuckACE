@@ -9,12 +9,12 @@ interface LogPanelProps {
 
 export function LogPanel({ logs, containerRef }: LogPanelProps) {
   return (
-    <Paper elevation={2} sx={{ p: 1.5, flex: 1, maxWidth: '100%', minHeight: 0, display: 'flex', overflow: 'hidden' }}>
+    <Paper elevation={2} sx={{ p: 1.5, flex: '0 0 180px', maxWidth: '100%', minHeight: 0, display: 'flex', overflow: 'hidden' }}>
       <Box
         ref={containerRef}
         sx={{
           flex: 1,
-          minHeight: 64,
+          minHeight: 0,
           overflowY: 'auto',
           border: '1px solid',
           borderColor: 'divider',

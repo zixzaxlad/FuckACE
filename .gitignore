@@ -23,7 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 info
-src/utils
 src/hooks
 
 便携版

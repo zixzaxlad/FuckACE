@@ -6,6 +6,7 @@ import { AppHeader } from './components/AppHeader';
 import { AffinityCoreDialog } from './components/dialogs/AffinityCoreDialog';
 import { FetchErrorSnackbar } from './components/FetchErrorSnackbar';
 import { LogPanel } from './components/LogPanel';
+import { LolLauncherCard } from './components/LolLauncherCard';
 import { MemoryCleanCard } from './components/MemoryCleanCard';
 import { PassiveActionsCard } from './components/PassiveActionsCard';
 import { PerformancePanel } from './components/PerformancePanel';
@@ -559,6 +560,8 @@ function App() {
         />
 
         <Box display="flex" flexDirection="column" gap={1} sx={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+          <Box display="flex" flexDirection="column" gap={1} sx={{ flex: 1, minHeight: 0, overflowY: 'auto', '& > *': { flexShrink: 0 } }}>
+          <LolLauncherCard addLog={addLog} />
           <Box display="flex" gap={1}>
             <PerformancePanel
               history={displayedHistory}
@@ -606,6 +609,7 @@ function App() {
             />
           </Box>
 
+          </Box>
           <LogPanel logs={logs} containerRef={logContainerRef} />
         </Box>
 

@@ -6,6 +6,8 @@ use tauri::{AppHandle, Manager, State, WindowEvent};
 use winreg::enums::*;
 use winreg::RegKey;
 
+mod game_launcher;
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RestrictResult {
     target_cores: Vec<u32>,
@@ -1661,6 +1663,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .manage(AppState)
+        .manage(game_launcher::LauncherState::default())
         .setup(|app| {
             setup_tray(app.handle())?;
             #[cfg(target_os = "windows")]
@@ -1681,6 +1684,10 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            game_launcher::get_running_lol_root,
+            game_launcher::capture_lol_click,
+            game_launcher::start_lol_origin,
+            game_launcher::cancel_lol_origin,
             restrict_processes,
             get_system_info,
             get_process_performance,
