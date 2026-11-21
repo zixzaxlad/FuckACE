@@ -18,6 +18,7 @@ import type {
   RestrictionSettingKey,
   RestrictionSettings,
 } from '../types/app';
+import { GameModeSwitch } from './GameModeSwitch';
 
 interface SettingItem {
   key: RestrictionSettingKey;
@@ -33,6 +34,7 @@ interface MonitoredProcessItem {
 
 interface RestrictionControlCardProps {
   settings: RestrictionSettings;
+  isAdmin: boolean;
   autoStartEnabled: boolean;
   loading: boolean;
   isMonitoring: boolean;
@@ -43,6 +45,7 @@ interface RestrictionControlCardProps {
   onSettingChange: (key: RestrictionSettingKey, checked: boolean) => void;
   onToggleAutoStartup: () => void;
   onOpenAffinitySettings: () => void;
+  onOpenAceInspection: () => void;
   onExecute: () => void;
 }
 
@@ -134,6 +137,7 @@ function StatusTile({
 
 export function RestrictionControlCard({
   settings,
+  isAdmin,
   autoStartEnabled,
   loading,
   isMonitoring,
@@ -144,6 +148,7 @@ export function RestrictionControlCard({
   onSettingChange,
   onToggleAutoStartup,
   onOpenAffinitySettings,
+  onOpenAceInspection,
   onExecute,
 }: RestrictionControlCardProps) {
   const renderSettingLabel = (item: SettingItem) => {
@@ -199,6 +204,7 @@ export function RestrictionControlCard({
                 />
               </Tooltip>
             ))}
+            <GameModeSwitch />
           </Box>
 
           <Divider sx={{ my: 0.6 }} />
@@ -238,12 +244,17 @@ export function RestrictionControlCard({
             </Tooltip>
           </Box>
 
-          <Box sx={{ flex: 1, display: 'flex', alignItems: 'flex-end', mt: 0.5 }}>
+          <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', mt: 0.5 }}>
+            {!isAdmin && (
+              <Typography variant="caption" color="text.secondary" sx={{ mb: 0.4, lineHeight: 1.3 }}>
+                需要以管理员身份运行才能执行限制
+              </Typography>
+            )}
             <Button
               variant="contained"
               startIcon={<StartIcon />}
               onClick={onExecute}
-              disabled={loading || isMonitoring}
+              disabled={loading || isMonitoring || !isAdmin}
               color="primary"
               size="small"
               fullWidth
@@ -271,11 +282,21 @@ export function RestrictionControlCard({
                 目标进程:
               </Typography>
               <Chip
-                label={gameProcesses.length > 0 ? gameProcesses.join(', ') : '未检测到'}
+                label={gameProcesses.length > 0 ? gameProcesses.join(', ') : '未启动'}
                 color={gameProcesses.length > 0 ? 'success' : 'default'}
                 size="small"
                 sx={{ maxWidth: '65%' }}
               />
+            </Box>
+            <Box display="flex" justifyContent="flex-end">
+              <Button
+                size="small"
+                variant="text"
+                onClick={onOpenAceInspection}
+                sx={{ fontSize: '0.68rem', py: 0, minWidth: 'auto' }}
+              >
+                ACE 体检
+              </Button>
             </Box>
           </Box>
 

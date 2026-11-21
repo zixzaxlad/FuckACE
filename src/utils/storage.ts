@@ -3,6 +3,8 @@ import type { RestrictionSettings } from '../types/app';
 interface Choices extends Partial<RestrictionSettings> {
   rememberChoices?: boolean;
   announcementsSeenKey?: string;
+  darkMode?: boolean;
+  riskySwitchesMigrated?: boolean;
   autoMemoryCleanOnGameStart?: boolean;
   autoMemoryCleanThreshold?: number | null;
   affinityCores?: number[];

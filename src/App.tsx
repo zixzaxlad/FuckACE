@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Box, Container, CssBaseline, ThemeProvider } from '@mui/material';
@@ -13,6 +14,8 @@ import { PerformancePanel } from './components/PerformancePanel';
 import { RestrictionControlCard } from './components/RestrictionControlCard';
 import { SystemInfoCard } from './components/SystemInfoCard';
 import { AnnouncementsDialog } from './components/dialogs/AnnouncementsDialog';
+import { AceInspectionDialog } from './components/dialogs/AceInspectionDialog';
+import { RiskSettingDialog } from './components/dialogs/RiskSettingDialog';
 import { UpdateDialog } from './components/dialogs/UpdateDialog';
 import { APP_VERSION } from './constants';
 import { useInitialData } from './services/api';
@@ -31,6 +34,7 @@ import {
   resetRegistryPriorityCommand,
   restrictProcesses,
   setAutoStartState,
+  syncTrayState,
   type IoSampleMap,
   type LoggedCommandDefinition,
 } from './services/processControl';
@@ -58,13 +62,19 @@ const restrictionSettingKeys: RestrictionSettingKey[] = [
   'autoRestrict',
 ];
 
+// 风险相对较大的两项：开启前需二次确认；旧版本中已开启的在升级时强制关闭
+const riskySettingLabels: Partial<Record<RestrictionSettingKey, string>> = {
+  enableIoPriority: 'I/O优先级',
+  enableMemoryPriority: '内存优先级',
+};
+
 function App() {
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [targetCores, setTargetCores] = useState<number[]>([]);
   const [processStatus, setProcessStatus] = useState<ProcessStatus | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(false);
-  const [darkMode, setDarkMode] = useState(true);
+  const [darkMode, setDarkMode] = useState(() => storage.getChoices().darkMode ?? true);
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [performance, setPerformance] = useState<ProcessPerformance[]>([]);
@@ -80,6 +90,8 @@ function App() {
   const [showAnnouncements, setShowAnnouncements] = useState(false);
   const [showUpdateDialog, setShowUpdateDialog] = useState(false);
   const [showAffinityDialog, setShowAffinityDialog] = useState(false);
+  const [showAceInspection, setShowAceInspection] = useState(false);
+  const [pendingRiskSetting, setPendingRiskSetting] = useState<RestrictionSettingKey | null>(null);
   const [affinityCores, setAffinityCores] = useState<number[]>([]);
   const [exportingReport, setExportingReport] = useState(false);
   const [memoryStatus, setMemoryStatus] = useState<MemoryCleanStatus | null>(null);
@@ -254,8 +266,7 @@ function App() {
     }
   }, [addLog, cleaning, fetchMemoryStatus]);
 
-  const checkAutoStart = useCallback(async () => {
-    try {
+  const checkAutoStart = useCallback(async () => {    try {
       const enabled = await checkAutoStartStatus();
       setAutoStartEnabled(enabled);
     } catch (error) {
@@ -339,8 +350,15 @@ function App() {
   }, [addLog, perfHistory, systemInfo]);
 
   useEffect(() => {
-    if (logContainerRef.current) {
-      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    const container = logContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    // 用户上翻查看历史时不要被新日志拽回底部
+    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distanceToBottom < 24) {
+      container.scrollTop = container.scrollHeight;
     }
   }, [logs]);
 
@@ -368,6 +386,17 @@ function App() {
     const cachedChoices = storage.getChoices() as ReturnType<typeof storage.getChoices> & {
       autoMemoryCleanOnGameStart?: boolean;
     };
+
+    // 一次性迁移：旧版本中已开启的 I/O 优先级、内存优先级统一关闭，之后由用户确认后再开启
+    if (cachedChoices.riskySwitchesMigrated !== true) {
+      cachedChoices.enableIoPriority = false;
+      cachedChoices.enableMemoryPriority = false;
+      storage.saveChoices({
+        enableIoPriority: false,
+        enableMemoryPriority: false,
+        riskySwitchesMigrated: true,
+      });
+    }
 
     if (!cachedChoices.rememberChoices) {
       return;
@@ -406,6 +435,7 @@ function App() {
       rememberChoices: true,
       autoMemoryCleanThreshold,
       affinityCores,
+      darkMode,
     } as Parameters<typeof storage.saveChoices>[0] & {
       autoMemoryCleanOnGameStart: boolean;
     });
@@ -419,6 +449,7 @@ function App() {
     autoMemoryCleanOnGameStart,
     autoMemoryCleanThreshold,
     affinityCores,
+    darkMode,
   ]);
 
   useEffect(() => {
@@ -496,9 +527,71 @@ function App() {
     void getCurrentWindow().setFocus().catch(() => {});
   }, [hasUpdate]);
 
+  // 托盘右键菜单的动作转发：菜单由 Rust 侧持有，这里执行与前端的同一套逻辑
+  useEffect(() => {
+    const unlistenPromises = [
+      listen('tray://restrict-now', () => {
+        void executeOnce();
+      }),
+      listen('tray://clean-now', () => {
+        void performCleanup();
+      }),
+      listen('tray://toggle-autorestrict', () => {
+        setAutoRestrict((value) => !value);
+      }),
+      listen('tray://toggle-autostart', () => {
+        void toggleAutoStartup();
+      }),
+    ];
+
+    return () => {
+      unlistenPromises.forEach((promise) => {
+        void promise.then((unlisten) => unlisten());
+      });
+    };
+  }, [executeOnce, performCleanup, toggleAutoStartup]);
+
+  const trayStatusText = useMemo(() => {
+    if (!hasAceProcess(performance)) {
+      return 'ACE: 未运行';
+    }
+
+    const targets: Array<[boolean | undefined, boolean | undefined]> = [
+      [processStatus?.sguard64_found, processStatus?.sguard64_restricted],
+      [processStatus?.sguardsvc64_found, processStatus?.sguardsvc64_restricted],
+      [processStatus?.ace_tray_found, processStatus?.ace_tray_restricted],
+      [processStatus?.ace_service_found, processStatus?.ace_service_restricted],
+    ];
+    const foundTargets = targets.filter(([found]) => found);
+    const allRestricted = foundTargets.length > 0 && foundTargets.every(([, restricted]) => restricted);
+
+    return allRestricted ? 'ACE: 运行中 · 已限制' : 'ACE: 运行中 · 未限制';
+  }, [performance, processStatus]);
+
+  useEffect(() => {
+    void syncTrayState(trayStatusText, autoRestrict, autoStartEnabled).catch((error) => {
+      console.error('同步托盘状态失败:', error);
+    });
+  }, [trayStatusText, autoRestrict, autoStartEnabled]);
+
   const handleSettingChange = useCallback((key: RestrictionSettingKey, checked: boolean) => {
+    // 高风险项开启前先弹确认框，关闭时直接生效
+    if (checked && riskySettingLabels[key]) {
+      setPendingRiskSetting(key);
+      return;
+    }
+
     restrictionSettingSetters[key](checked);
   }, [restrictionSettingSetters]);
+
+  const confirmPendingRiskSetting = () => {
+    if (!pendingRiskSetting) {
+      return;
+    }
+
+    restrictionSettingSetters[pendingRiskSetting](true);
+    setPendingRiskSetting(null);
+  };
 
   const toggleDarkMode = () => {
     setDarkMode((currentValue) => !currentValue);
@@ -541,7 +634,7 @@ function App() {
 
   return (
     <ThemeProvider theme={currentTheme}>
-      <CssBaseline />
+      <CssBaseline enableColorScheme />
       <Container maxWidth="lg" sx={{ py: 1, height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <AppHeader
           appVersion={APP_VERSION}
@@ -595,16 +688,18 @@ function App() {
             />
             <RestrictionControlCard
               settings={restrictionSettings}
+              isAdmin={isAdmin}
               autoStartEnabled={autoStartEnabled}
               loading={loading}
               isMonitoring={isMonitoring}
               affinityCustomized={affinityCores.length > 0}
-              targetCores={targetCores}
+              targetCores={affinityCores.length > 0 ? affinityCores : targetCores}
               gameProcesses={gameProcesses}
               processStatus={processStatus}
               onSettingChange={handleSettingChange}
               onToggleAutoStartup={toggleAutoStartup}
               onOpenAffinitySettings={() => setShowAffinityDialog(true)}
+              onOpenAceInspection={() => setShowAceInspection(true)}
               onExecute={executeOnce}
             />
           </Box>
@@ -638,6 +733,18 @@ function App() {
           value={affinityCores}
           onConfirm={setAffinityCores}
           onClose={() => setShowAffinityDialog(false)}
+        />
+
+        <RiskSettingDialog
+          open={pendingRiskSetting !== null}
+          settingLabel={pendingRiskSetting ? riskySettingLabels[pendingRiskSetting] ?? '' : ''}
+          onCancel={() => setPendingRiskSetting(null)}
+          onConfirm={confirmPendingRiskSetting}
+        />
+
+        <AceInspectionDialog
+          open={showAceInspection}
+          onClose={() => setShowAceInspection(false)}
         />
 
         <FetchErrorSnackbar open={fetchError} />

@@ -73,3 +73,27 @@ export interface MemoryCleanResult {
   processes_total: number;
   messages: string[];
 }
+
+
+export interface AceReportItem {
+  level: 'ok' | 'warn' | 'info' | string;
+  title: string;
+  detail: string;
+}
+
+export interface AceInstallation {
+  path: string;
+  kind: string;
+  size_mb: number;
+  files: number;
+  active: boolean;
+}
+
+export interface AceReport {
+  installed: boolean;
+  processes: string[];
+  services: string[];
+  drivers: string[];
+  installations: AceInstallation[];
+  items: AceReportItem[];
+}

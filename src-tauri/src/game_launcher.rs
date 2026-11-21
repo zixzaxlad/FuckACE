@@ -319,6 +319,7 @@ fn run(app: &AppHandle, config: &LaunchConfig, cancelled: &AtomicBool) -> Result
     {
         return Err("LOL 客户端已运行，请先退出再执行完整自动引导".into());
     }
+    crate::game_mode::ensure_enabled(app)?;
     emit(app, "正在启动游戏内置 ACE…")?;
     if !ace_ready(&ace)? {
         start_program(&ace)?;

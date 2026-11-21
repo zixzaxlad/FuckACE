@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use sysinfo::{Pid, ProcessesToUpdate, System};
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use winreg::enums::*;
 use winreg::RegKey;
 
 mod game_launcher;
+mod game_mode;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct RestrictResult {
@@ -110,6 +112,9 @@ const ALL_MONITORED_EXE_NAMES: &[&str] = &[
     "TheDivision2.exe",
     "Endfield.exe",
     "Calabiyau-Win64-Shipping.exe",
+    "NBA2KOL2.exe",
+    "CFHD.exe",
+    "CFHD-The10thZone.exe",
 ];
 
 fn set_game_registry_priority(exe_name: &str, cpu: u32, io: u32) -> Result<String, String> {
@@ -1051,8 +1056,12 @@ async fn get_process_performance() -> Vec<ProcessPerformance> {
     system.refresh_cpu_all();
     system.refresh_processes(ProcessesToUpdate::All, true);
 
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     system.refresh_processes(ProcessesToUpdate::All, true);
+
+    // sysinfo 返回的是"占单个逻辑核"的百分比，多线程可超过 100；
+    // 除以逻辑核数换成占整机百分比，与任务管理器口径一致
+    let logical_cores = system.cpus().len().max(1) as f32;
 
     let target_names = vec![
         "sguard64.exe",
@@ -1071,7 +1080,7 @@ async fn get_process_performance() -> Vec<ProcessPerformance> {
                 performances.push(ProcessPerformance {
                     pid: pid.as_u32(),
                     name: process.name().to_string_lossy().to_string(),
-                    cpu_usage: process.cpu_usage(),
+                    cpu_usage: process.cpu_usage() / logical_cores,
                     memory_mb: process.memory() as f64 / 1024.0 / 1024.0,
                     // 返回累计字节数,由前端跨采样做差分计算速率;
                     // 窗口增量(read_bytes/written_bytes)只覆盖此处 200ms 刷新间隔,不能直接当速率用
@@ -1112,18 +1121,48 @@ fn hide_main_window(app: &AppHandle) {
     }
 }
 
+fn toggle_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let visible = window.is_visible().unwrap_or(false);
+        let minimized = window.is_minimized().unwrap_or(false);
+        if visible && !minimized {
+            let _ = window.hide();
+        } else {
+            show_main_window(app);
+        }
+    }
+}
+
+// 托盘菜单句柄：前端状态变化时通过 sync_tray_state 更新状态行与开关勾选
+struct TrayMenuState {
+    status_item: MenuItem<tauri::Wry>,
+    auto_restrict_item: CheckMenuItem<tauri::Wry>,
+    autostart_item: CheckMenuItem<tauri::Wry>,
+}
+
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+    let status = MenuItem::with_id(app, "status", "ACE: 未运行", false, None::<&str>)?;
+    let restrict_now = MenuItem::with_id(app, "restrict-now", "立即限制 ACE", true, None::<&str>)?;
+    let clean_now = MenuItem::with_id(app, "clean-now", "立即清理内存", true, None::<&str>)?;
+    let auto_restrict =
+        CheckMenuItem::with_id(app, "toggle-autorestrict", "自动限制", true, false, None::<&str>)?;
+    let autostart =
+        CheckMenuItem::with_id(app, "toggle-autostart", "开机自启", true, false, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
-    let hide = MenuItem::with_id(app, "hide", "隐藏到托盘", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
 
     let menu = Menu::with_items(
         app,
         &[
+            &status,
+            &PredefinedMenuItem::separator(app)?,
+            &restrict_now,
+            &clean_now,
+            &PredefinedMenuItem::separator(app)?,
+            &auto_restrict,
+            &autostart,
+            &PredefinedMenuItem::separator(app)?,
             &show,
-            &PredefinedMenuItem::separator(app)?,
-            &hide,
-            &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
     )?;
@@ -1133,34 +1172,72 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .icon(app.default_window_icon().unwrap().clone())
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .on_tray_icon_event(|tray, event| match event {
-            TrayIconEvent::Click {
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
                 button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
                 ..
-            } => {
-                show_main_window(tray.app_handle());
+            } = event
+            {
+                toggle_main_window(tray.app_handle());
             }
-            TrayIconEvent::DoubleClick {
-                button: tauri::tray::MouseButton::Left,
-                ..
-            } => {
-                show_main_window(tray.app_handle());
-            }
-            _ => {}
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "quit" => {
-                std::process::exit(0);
+            "restrict-now" => {
+                let _ = app.emit("tray://restrict-now", ());
+            }
+            "clean-now" => {
+                let _ = app.emit("tray://clean-now", ());
+            }
+            "toggle-autorestrict" => {
+                let _ = app.emit("tray://toggle-autorestrict", ());
+            }
+            "toggle-autostart" => {
+                let _ = app.emit("tray://toggle-autostart", ());
             }
             "show" => {
                 show_main_window(app);
             }
-            "hide" => {
-                hide_main_window(app);
+            "quit" => {
+                std::process::exit(0);
             }
             _ => {}
         })
         .build(app)?;
+
+    app.manage(TrayMenuState {
+        status_item: status,
+        auto_restrict_item: auto_restrict,
+        autostart_item: autostart,
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+fn sync_tray_state(
+    app: AppHandle,
+    state: State<'_, TrayMenuState>,
+    status_text: String,
+    auto_restrict: bool,
+    autostart: bool,
+) -> Result<(), String> {
+    state
+        .status_item
+        .set_text(&status_text)
+        .map_err(|e| format!("更新托盘状态失败: {e}"))?;
+    state
+        .auto_restrict_item
+        .set_checked(auto_restrict)
+        .map_err(|e| format!("更新自动限制开关失败: {e}"))?;
+    state
+        .autostart_item
+        .set_checked(autostart)
+        .map_err(|e| format!("更新开机自启开关失败: {e}"))?;
+
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some(format!("FuckACE · {status_text}")));
+    }
 
     Ok(())
 }
@@ -1318,6 +1395,23 @@ async fn raise_endfield_priority() -> Result<String, String> {
 async fn raise_calabiyau_priority() -> Result<String, String> {
     if !is_elevated() { return Err("需要管理员权限才能修改注册表".to_string()); }
     set_game_registry_priority("Calabiyau-Win64-Shipping.exe", 3, 3)
+}
+
+#[tauri::command]
+async fn raise_nba2kol2_priority() -> Result<String, String> {
+    if !is_elevated() { return Err("需要管理员权限才能修改注册表".to_string()); }
+    set_game_registry_priority("NBA2KOL2.exe", 3, 3)
+}
+
+#[tauri::command]
+async fn raise_cfhd_priority() -> Result<String, String> {
+    if !is_elevated() { return Err("需要管理员权限才能修改注册表".to_string()); }
+    // CF HD 在不同渠道/模式下进程名不一致，两个已知名字都写入
+    let results: Vec<String> = ["CFHD.exe", "CFHD-The10thZone.exe"]
+        .iter()
+        .map(|name| set_game_registry_priority(name, 3, 3).unwrap_or_else(|e| e))
+        .collect();
+    Ok(results.join("\n"))
 }
 
 #[tauri::command]
@@ -1653,7 +1747,553 @@ fn get_desktop_path() -> Result<std::path::PathBuf, String> {
     Err("无法获取桌面路径".to_string())
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+// ===== ACE 体检（只读诊断） =====
+
+#[derive(Debug, Serialize)]
+struct AceReportItem {
+    level: String,
+    title: String,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AceInstallation {
+    path: String,
+    kind: String,
+    size_mb: f64,
+    files: usize,
+    active: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AceReport {
+    installed: bool,
+    processes: Vec<String>,
+    services: Vec<String>,
+    drivers: Vec<String>,
+    installations: Vec<AceInstallation>,
+    items: Vec<AceReportItem>,
+}
+
+fn ace_item(level: &str, title: &str, detail: &str) -> AceReportItem {
+    AceReportItem {
+        level: level.to_string(),
+        title: title.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+fn path_size(path: &Path) -> u64 {
+    if let Ok(metadata) = path.metadata() {
+        if metadata.is_file() {
+            return metadata.len();
+        }
+    }
+
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            total += path_size(&entry.path());
+        }
+    }
+    total
+}
+
+fn dir_footprint(path: &Path) -> (usize, u64) {
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    let mut visited = 0usize;
+
+    while let Some(current) = stack.pop() {
+        visited += 1;
+        if visited > 20000 {
+            break;
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&current) {
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => stack.push(entry_path),
+                    Ok(_) => {
+                        files += 1;
+                        bytes += entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    (files, bytes)
+}
+
+/// 把服务/驱动的 ImagePath 还原成可检查的绝对路径
+fn resolve_image_path(raw: &str) -> PathBuf {
+    let mut path = raw.trim().trim_matches('"').to_string();
+
+    if let Some(stripped) = path.strip_prefix(r"\??\") {
+        path = stripped.to_string();
+    }
+
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:/Windows".to_string());
+
+    if let Some(stripped) = path.strip_prefix(r"\SystemRoot\") {
+        return PathBuf::from(format!(r"{}\{}", system_root, stripped));
+    }
+
+    if !path.contains(':') {
+        return PathBuf::from(system_root).join(path);
+    }
+
+    for ext in [".exe", ".sys", ".dll"] {
+        if let Some(pos) = path.to_lowercase().find(ext) {
+            return PathBuf::from(&path[..pos + ext.len()]);
+        }
+    }
+
+    PathBuf::from(path)
+}
+
+fn query_service_state(name: &str) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatusEx, SC_MANAGER_CONNECT,
+        SC_STATUS_PROCESS_INFO, SERVICE_QUERY_STATUS, SERVICE_STATUS_PROCESS,
+    };
+
+    let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT).ok()?;
+        let service = OpenServiceW(scm, PCWSTR(name_wide.as_ptr()), SERVICE_QUERY_STATUS);
+
+        let state = match service {
+            Ok(handle) => {
+                let mut status = SERVICE_STATUS_PROCESS::default();
+                let mut needed = 0u32;
+                let buffer = std::slice::from_raw_parts_mut(
+                    &mut status as *mut SERVICE_STATUS_PROCESS as *mut u8,
+                    std::mem::size_of::<SERVICE_STATUS_PROCESS>(),
+                );
+                let queried = QueryServiceStatusEx(handle, SC_STATUS_PROCESS_INFO, Some(buffer), &mut needed);
+                let _ = CloseServiceHandle(handle);
+
+                if queried.is_ok() {
+                    let text = match status.dwCurrentState.0 {
+                        1 => "已停止",
+                        2 => "启动中",
+                        3 => "停止中",
+                        4 => "运行中",
+                        5 => "继续中",
+                        6 => "暂停中",
+                        7 => "已暂停",
+                        _ => "未知",
+                    };
+                    Some(text.to_string())
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        };
+
+        let _ = CloseServiceHandle(scm);
+        state
+    }
+}
+
+fn start_type_text(start: u32) -> &'static str {
+    match start {
+        0 => "开机启动",
+        1 => "系统启动",
+        2 => "自动",
+        3 => "手动",
+        4 => "禁用",
+        _ => "未知",
+    }
+}
+
+/// 从 Steam 的 libraryfolders.vdf 读出所有游戏库根目录
+fn steam_library_roots() -> Vec<PathBuf> {
+    let mut steam_roots: Vec<PathBuf> = Vec::new();
+
+    // 注册表里记录的 Steam 安装位置（最常见的情况不在 Program Files）
+    for (hive, key, value) in [
+        (HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+    ] {
+        if let Ok(steam) = RegKey::predef(hive).open_subkey(key) {
+            if let Ok(path) = steam.get_value::<String, _>(value) {
+                let candidate = PathBuf::from(path.replace('/', "\\"));
+                if candidate.is_dir() {
+                    steam_roots.push(candidate);
+                }
+            }
+        }
+    }
+
+    for env in ["ProgramFiles(x86)", "ProgramFiles"] {
+        if let Some(base) = std::env::var_os(env) {
+            let candidate = PathBuf::from(base).join("Steam");
+            if candidate.is_dir() {
+                steam_roots.push(candidate);
+            }
+        }
+    }
+
+    let mut libraries: Vec<PathBuf> = steam_roots.clone();
+
+    for steam in &steam_roots {
+        let vdf = steam.join("steamapps").join("libraryfolders.vdf");
+        if let Ok(text) = std::fs::read_to_string(&vdf) {
+            for line in text.lines() {
+                if !line.contains("\"path\"") {
+                    continue;
+                }
+
+                if let Some(value) = line.split('"').nth(3) {
+                    let path = PathBuf::from(value.replace("\\\\", "\\"));
+                    if path.is_dir() {
+                        libraries.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    libraries.sort();
+    libraries.dedup();
+    libraries
+}
+
+/// 在游戏目录内浅层查找游戏自带的 ACE 副本
+fn scan_ace_dirs(root: &Path, depth: usize, budget: &mut usize, found: &mut Vec<PathBuf>) {
+    if depth == 0 || *budget == 0 {
+        return;
+    }
+
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        *budget = budget.saturating_sub(1);
+        if *budget == 0 {
+            return;
+        }
+
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name == "anticheatexpert" {
+            found.push(path);
+            continue;
+        }
+
+        // 跳过明显的资源目录，控制扫描成本
+        if matches!(
+            name.as_str(),
+            "content" | "movies" | "audio" | "sound" | "textures" | "paks" | "localization"
+        ) {
+            continue;
+        }
+
+        scan_ace_dirs(&path, depth - 1, budget, found);
+    }
+}
+
+#[tauri::command]
+async fn get_ace_report() -> AceReport {
+    let mut processes = Vec::new();
+    let mut services = Vec::new();
+    let mut drivers = Vec::new();
+    let mut items = Vec::new();
+
+    // 进程
+    let mut system = System::new();
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    let wanted = [
+        "sguard64",
+        "sguardsvc64",
+        "ace-tray",
+        "ace-service64",
+        "ace-base",
+        "aceservice",
+    ];
+
+    let mut referenced_paths: Vec<PathBuf> = Vec::new();
+    let mut process_dirs: Vec<PathBuf> = Vec::new();
+
+    for (pid, process) in system.processes() {
+        let name = process.name().to_string_lossy().to_lowercase();
+        let stem = name.trim_end_matches(".exe");
+
+        if !wanted.contains(&stem) {
+            continue;
+        }
+
+        let exe = process
+            .exe()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        processes.push(format!("{} (PID {}) {}", process.name().to_string_lossy(), pid, exe.to_string_lossy()));
+
+        if let Some(parent) = exe.parent() {
+            process_dirs.push(parent.to_path_buf());
+            referenced_paths.push(exe);
+        }
+    }
+
+    // 服务与驱动：遍历 Services 注册表，覆盖 ace-base 这类改名形态
+    let mut orphan_count = 0usize;
+    let mut service_dirs: Vec<PathBuf> = Vec::new();
+    let services_key = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SYSTEM\CurrentControlSet\Services")
+        .ok();
+
+    if let Some(root) = services_key {
+        for name in root.enum_keys().flatten() {
+            let key = match root.open_subkey(&name) {
+                Ok(key) => key,
+                Err(_) => continue,
+            };
+
+            let image_path: String = match key.get_value("ImagePath") {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            let lowered = image_path.to_lowercase();
+            let is_ace = lowered.contains("anticheatexpert")
+                || lowered.contains(r"\ace-")
+                || lowered.contains("ace-base")
+                || lowered.contains("sguard");
+
+            if !is_ace {
+                continue;
+            }
+
+            let service_type: u32 = key.get_value("Type").unwrap_or(0);
+            let start: u32 = key.get_value("Start").unwrap_or(3);
+            let resolved = resolve_image_path(&image_path);
+            let exists = resolved.exists();
+
+            if !exists {
+                orphan_count += 1;
+            }
+
+            if let Some(parent) = resolved.parent() {
+                service_dirs.push(parent.to_path_buf());
+            }
+            referenced_paths.push(resolved.clone());
+
+            let state = query_service_state(&name).unwrap_or_else(|| "未知".to_string());
+            let line = format!(
+                "{} | {} | {} | {} | {}",
+                name,
+                state,
+                start_type_text(start),
+                if exists { "文件存在" } else { "文件缺失" },
+                resolved.to_string_lossy()
+            );
+
+            if service_type & 0x3 != 0 {
+                drivers.push(line);
+            } else {
+                services.push(line);
+            }
+        }
+    }
+
+    // 收集所有可能的安装位置
+    let mut candidates: Vec<(PathBuf, &'static str)> = Vec::new();
+
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        let global = PathBuf::from(program_files).join("AntiCheatExpert");
+        if global.is_dir() {
+            candidates.push((global, "全局安装"));
+        }
+    }
+
+    if let Some(program_data) = std::env::var_os("ProgramData") {
+        let data = PathBuf::from(program_data).join("AntiCheatExpert");
+        if data.is_dir() {
+            candidates.push((data, "数据目录"));
+        }
+    }
+
+    for dir in process_dirs {
+        candidates.push((dir, "进程所在目录"));
+    }
+
+    for dir in service_dirs {
+        candidates.push((dir, "服务/驱动目录"));
+    }
+
+    // 游戏库内自带的副本
+    let mut game_dirs: Vec<PathBuf> = Vec::new();
+    let mut budget = 8000usize;
+    for library in steam_library_roots() {
+        let common = library.join("steamapps").join("common");
+        if !common.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&common) {
+            for entry in entries.flatten() {
+                let game_root = entry.path();
+                if game_root.is_dir() {
+                    scan_ace_dirs(&game_root, 3, &mut budget, &mut game_dirs);
+                }
+            }
+        }
+    }
+    for dir in game_dirs {
+        candidates.push((dir, "游戏内置副本"));
+    }
+
+    // 去重 + 排除被其他候选目录包含的子目录
+    let mut installations: Vec<AceInstallation> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+
+    let system_root = std::env::var("SystemRoot")
+        .unwrap_or_else(|_| r"C://Windows".to_string())
+        .to_lowercase();
+
+    for (path, kind) in candidates {
+        let key = path.to_string_lossy().to_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        // 系统目录只是驱动落地位置，不算 ACE 安装
+        if key.starts_with(&system_root) {
+            continue;
+        }
+
+        seen.push(key.clone());
+
+        let (files, bytes) = dir_footprint(&path);
+        let lowered_path = key;
+        let active = referenced_paths.iter().any(|referenced| {
+            referenced
+                .to_string_lossy()
+                .to_lowercase()
+                .starts_with(&lowered_path)
+        });
+
+        installations.push(AceInstallation {
+            path: path.to_string_lossy().to_string(),
+            kind: kind.to_string(),
+            size_mb: (bytes as f64 / 1024.0 / 1024.0 * 10.0).round() / 10.0,
+            files,
+            active,
+        });
+    }
+
+    // 去掉被父目录覆盖的条目（同一份安装只保留最外层）
+    installations.sort_by(|a, b| a.path.len().cmp(&b.path.len()));
+    let mut filtered: Vec<AceInstallation> = Vec::new();
+    for installation in installations {
+        let lowered = installation.path.to_lowercase();
+        if filtered
+            .iter()
+            .any(|kept| lowered.starts_with(&kept.path.to_lowercase()))
+        {
+            continue;
+        }
+        filtered.push(installation);
+    }
+
+    let installed = !filtered.is_empty() || !services.is_empty() || !drivers.is_empty();
+
+    if !installed {
+        items.push(ace_item(
+            "info",
+            "未检测到 ACE",
+            "没有找到 ACE 安装目录、服务或驱动。如果游戏正在运行，可能该游戏使用的是内置的轻量版本，或 ACE 尚未初始化。",
+        ));
+    } else {
+        items.push(ace_item(
+            "ok",
+            "检测到 ACE 安装",
+            "安装目录、服务或驱动至少存在一项，说明 ACE 已在本机落地。",
+        ));
+
+        let install_roots: Vec<&AceInstallation> = filtered
+            .iter()
+            .filter(|item| item.kind != "数据目录")
+            .collect();
+        let active_count = install_roots.iter().filter(|item| item.active).count();
+
+        if install_roots.len() > 1 {
+            items.push(ace_item(
+                "warn",
+                &format!("检测到 {} 处 ACE 副本", install_roots.len()),
+                &format!(
+                    "其中 {} 处正在被进程或服务引用。游戏目录内的副本属于游戏本体，删除后启动器会重新校验下载，不建议手动清理。",
+                    active_count
+                ),
+            ));
+        } else if install_roots.len() == 1 {
+            items.push(ace_item("ok", "只有一处 ACE 安装", "没有发现重复副本。"));
+        }
+
+        if processes.is_empty() {
+            items.push(ace_item(
+                "warn",
+                "当前没有 ACE 进程",
+                "只能看到服务/驱动。部分游戏把 ACE 合入游戏主程序或以驱动形式接入，此时按进程名识别和限制的方式不适用。",
+            ));
+        } else {
+            items.push(ace_item(
+                "info",
+                &format!("检测到 {} 个 ACE 进程", processes.len()),
+                "进程存在，主动限制可用。",
+            ));
+        }
+
+        if orphan_count > 0 {
+            items.push(ace_item(
+                "info",
+                &format!("{} 个服务/驱动条目暂无对应文件", orphan_count),
+                "这些条目可能是旧版本残留，也可能是游戏运行时临时创建的动态条目，先重启后复查；确认游戏不依赖后再考虑清理。",
+            ));
+        }
+
+        let loaded = PathBuf::from(r"C:/Windows/System32/drivers/ACE-BASE.sys");
+        let packaged = PathBuf::from(r"C:/Program Files/AntiCheatExpert/ACE-BASE.sys");
+        if let (Ok(loaded_meta), Ok(packaged_meta)) = (loaded.metadata(), packaged.metadata()) {
+            if let (Ok(loaded_time), Ok(packaged_time)) = (loaded_meta.modified(), packaged_meta.modified()) {
+                if packaged_time > loaded_time {
+                    items.push(ace_item(
+                        "warn",
+                        "驱动包比系统已加载的更新",
+                        "安装目录里的驱动比系统目录里的新，可能是升级待重启生效；如果重启后仍不一致，建议重新安装 ACE。",
+                    ));
+                }
+            }
+        }
+    }
+
+    AceReport {
+        installed,
+        processes,
+        services,
+        drivers,
+        installations: filtered,
+        items,
+    }
+}
+
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -1688,6 +2328,8 @@ pub fn run() {
             game_launcher::capture_lol_click,
             game_launcher::start_lol_origin,
             game_launcher::cancel_lol_origin,
+            game_mode::get_game_mode,
+            game_mode::set_game_mode,
             restrict_processes,
             get_system_info,
             get_process_performance,
@@ -1715,8 +2357,12 @@ pub fn run() {
             raise_division2_priority,
             raise_endfield_priority,
             raise_calabiyau_priority,
+            raise_nba2kol2_priority,
+            raise_cfhd_priority,
             get_memory_clean_status,
             clean_memory_and_temp,
+            sync_tray_state,
+            get_ace_report,
 
         ])
         .run(tauri::generate_context!())

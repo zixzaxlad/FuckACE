@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  AceReport,
   MemoryCleanResult,
   MemoryCleanStatus,
   PerfDataPoint,
@@ -172,6 +173,22 @@ export const gameOptimizationActions: GameOptimizationAction[] = [
     successMessage: '卡拉比丘优先级修改完成:',
     errorMessage: '提高卡拉比丘优先级失败',
   },
+  {
+    id: 'nba2kol2',
+    label: 'NBA2KOL2优化',
+    command: 'raise_nba2kol2_priority',
+    startMessage: '开始提高NBA2KOL2优先级...',
+    successMessage: 'NBA2KOL2优先级修改完成:',
+    errorMessage: '提高NBA2KOL2优先级失败',
+  },
+  {
+    id: 'cfhd',
+    label: 'CF HD优化',
+    command: 'raise_cfhd_priority',
+    startMessage: '开始提高CF HD优先级...',
+    successMessage: 'CF HD优先级修改完成:',
+    errorMessage: '提高CF HD优先级失败',
+  },
 ];
 
 export async function getSystemInfo() {
@@ -202,6 +219,10 @@ export async function executeTextCommand(command: LoggedCommandDefinition) {
 
 export async function getMemoryCleanStatus() {
   return invoke<MemoryCleanStatus>('get_memory_clean_status');
+}
+
+export async function syncTrayState(statusText: string, autoRestrict: boolean, autostart: boolean) {
+  return invoke<void>('sync_tray_state', { statusText, autoRestrict, autostart });
 }
 
 export async function cleanMemoryAndTemp() {
@@ -268,17 +289,21 @@ export function buildPerformancePoint(
       minute: '2-digit',
       second: '2-digit',
     }),
-    sguard_cpu: sguardProcess ? parseFloat(sguardProcess.cpu_usage.toFixed(1)) : null,
+    sguard_cpu: sguardProcess ? parseFloat(sguardProcess.cpu_usage.toFixed(2)) : null,
     sguard_mem: sguardProcess ? parseFloat(sguardProcess.memory_mb.toFixed(1)) : null,
-    sguardsvc_cpu: sguardServiceProcess ? parseFloat(sguardServiceProcess.cpu_usage.toFixed(1)) : null,
+    sguardsvc_cpu: sguardServiceProcess ? parseFloat(sguardServiceProcess.cpu_usage.toFixed(2)) : null,
     sguardsvc_mem: sguardServiceProcess ? parseFloat(sguardServiceProcess.memory_mb.toFixed(1)) : null,
     sguard_io: computeIoRateKbPerSec(sguardProcess, prevIoSamples, nowMs),
     sguardsvc_io: computeIoRateKbPerSec(sguardServiceProcess, prevIoSamples, nowMs),
-    acetray_cpu: aceTrayProcess ? parseFloat(aceTrayProcess.cpu_usage.toFixed(1)) : null,
+    acetray_cpu: aceTrayProcess ? parseFloat(aceTrayProcess.cpu_usage.toFixed(2)) : null,
     acetray_mem: aceTrayProcess ? parseFloat(aceTrayProcess.memory_mb.toFixed(1)) : null,
     acetray_io: computeIoRateKbPerSec(aceTrayProcess, prevIoSamples, nowMs),
-    aceservice_cpu: aceServiceProcess ? parseFloat(aceServiceProcess.cpu_usage.toFixed(1)) : null,
+    aceservice_cpu: aceServiceProcess ? parseFloat(aceServiceProcess.cpu_usage.toFixed(2)) : null,
     aceservice_mem: aceServiceProcess ? parseFloat(aceServiceProcess.memory_mb.toFixed(1)) : null,
     aceservice_io: computeIoRateKbPerSec(aceServiceProcess, prevIoSamples, nowMs),
   };
+}
+
+export async function getAceReport(): Promise<AceReport> {
+  return invoke<AceReport>('get_ace_report');
 }
